@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sort Sounds — hear sorting algorithms</title>
+<meta name="description" content="Watch and hear sorting algorithms: every comparison plays a note.">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<style>
+  :root { --bg: #1b1b1d; --panel: #232326; --text: #efeff1; --muted: #a9a9b0; --line: #36363b; --accent: #a3a8ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--muted); font: 15px/1.6 system-ui, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { color: var(--text); font-size: 28px; margin: 0; display: flex; align-items: center; gap: 10px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  canvas { width: 100%; aspect-ratio: 15 / 7; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; display: block; margin: 20px 0 12px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 14px 20px; align-items: end; }
+  label { display: grid; gap: 4px; color: var(--text); font-size: 14px; }
+  label.check { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; }
+  select, button { font: inherit; border-radius: 8px; padding: 8px 14px; }
+  select { color: var(--text); background: var(--panel); border: 1px solid var(--line); }
+  button { color: #16162a; background: var(--accent); border: 0; font-weight: 500; cursor: pointer; min-width: 84px; }
+  button.quiet { background: none; color: var(--accent); border: 1px solid var(--line); }
+  input[type=range] { width: 150px; accent-color: var(--accent); }
+  .stats { display: flex; gap: 28px; margin: 16px 0 0; }
+  .stats dt { font-size: 13px; }
+  .stats dd { margin: 0; color: var(--text); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  #status { min-height: 1.6em; margin: 12px 0 0; color: var(--text); }
+</style>
+</head>
+<body>
+<main>
+  <h1><img src="logo.svg" alt="" width="40" height="40">Sort Sounds</h1>
+  <p>Every comparison plays a note: short bars are low, tall bars are high. Each algorithm has its own tune.</p>
+
+  <canvas id="canvas" width="900" height="420" role="img" aria-label="Bars being sorted from shortest to tallest"></canvas>
+
+  <div class="controls">
+    <label>Algorithm <select id="algorithm"></select></label>
+    <label>Bars <input type="range" id="size" min="10" max="150" value="60"></label>
+    <label>Speed <input type="range" id="speed" min="0" max="100" value="45"></label>
+    <label class="check"><input type="checkbox" id="sound" checked> Sound</label>
+    <button type="button" id="play">Play</button>
+    <button type="button" id="shuffle" class="quiet">Shuffle</button>
+  </div>
+
+  <dl class="stats">
+    <div><dt>Comparisons</dt><dd id="compares">0</dd></div>
+    <div><dt>Writes</dt><dd id="writes">0</dd></div>
+  </dl>
+  <p id="status" role="status"></p>
+</main>
+
+<script src="sorts.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $('canvas'), ctx = canvas.getContext('2d');
+const COLORS = { idle: '#7d82c9', compare: '#ffd166', swap: '#ff9ecb', write: '#ff9ecb', done: '#7fd6a0' };
+
+let values, steps, running = false, finished = false;
+let counts, mark, doneUpTo, budget = 0, lastFrame = 0, lastTone = 0, audio;
+
+// After the sort, sweep left to right so you hear the finished scale.
+function* sortThenSweep(a) {
+  yield* SORTS[$('algorithm').value](a);
+  for (let i = 0; i < a.length; i++) yield ['done', i];
+}
+
+function reset() {
+  const n = Number($('size').value);
+  values = Array.from({ length: n }, (_, i) => i + 1);
+  for (let i = n - 1; i > 0; i--) { // Fisher-Yates shuffle
+    const j = Math.floor(Math.random() * (i + 1));
+    [values[i], values[j]] = [values[j], values[i]];
+  }
+  steps = sortThenSweep(values);
+  counts = { compare: 0, write: 0 };
+  mark = null;
+  doneUpTo = -1;
+  finished = false;
+  setRunning(false);
+  $('status').textContent = '';
+  draw();
+}
+
+function setRunning(on) {
+  running = on;
+  $('play').textContent = on ? 'Pause' : 'Play';
+  if (on) {
+    lastFrame = performance.now();
+    requestAnimationFrame(frame);
+  }
+}
+
+function tone(value) {
+  const nowMs = performance.now();
+  if (!$('sound').checked || !audio || nowMs - lastTone < 18) return; // at most one note per frame or it turns to noise
+  lastTone = nowMs;
+  const t = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
+  osc.type = 'triangle';
+  osc.frequency.value = 160 + 1000 * value / values.length;
+  gain.gain.setValueAtTime(0.08, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
+  osc.connect(gain).connect(audio.destination);
+  osc.start(t);
+  osc.stop(t + 0.1);
+}
+
+function step() {
+  const { value, done } = steps.next();
+  if (done) {
+    finished = true;
+    setRunning(false);
+    mark = null;
+    $('status').textContent = `Sorted ${values.length} bars with ${counts.compare.toLocaleString()} comparisons and ${counts.write.toLocaleString()} writes.`;
+    return;
+  }
+  const [kind, i, j] = value;
+  if (kind === 'compare') counts.compare++;
+  else if (kind === 'swap') counts.write += 2;
+  else if (kind === 'write') counts.write++;
+  else doneUpTo = i;
+  mark = { kind, i, j };
+  tone(values[kind === 'compare' ? j : i]);
+}
+
+function frame(now) {
+  if (!running) return;
+  // speed slider 0..100 maps to roughly 3..3000 steps a second
+  const perSecond = 3 * Math.pow(1000, Number($('speed').value) / 100);
+  budget += perSecond * Math.min(now - lastFrame, 100) / 1000;
+  lastFrame = now;
+  while (budget >= 1 && running) {
+    budget--;
+    step();
+  }
+  draw();
+  if (running) requestAnimationFrame(frame);
+}
+
+function draw() {
+  const { width, height } = canvas, n = values.length, w = width / n;
+  ctx.clearRect(0, 0, width, height);
+  for (let i = 0; i < n; i++) {
+    const h = values[i] / n * (height - 20);
+    ctx.fillStyle = i <= doneUpTo ? COLORS.done : mark && (i === mark.i || i === mark.j) ? COLORS[mark.kind] : COLORS.idle;
+    ctx.fillRect(i * w + 0.5, height - h, Math.max(w - 1, 1), h);
+  }
+  $('compares').textContent = counts.compare.toLocaleString();
+  $('writes').textContent = counts.write.toLocaleString();
+}
+
+for (const name of Object.keys(SORTS)) $('algorithm').add(new Option(name));
+$('play').addEventListener('click', () => {
+  audio ??= new AudioContext(); // browsers only allow sound to start from a click
+  audio.resume();
+  if (finished) reset();
+  setRunning(!running);
+});
+$('shuffle').addEventListener('click', reset);
+$('algorithm').addEventListener('change', reset);
+$('size').addEventListener('input', reset);
+reset();
+</script>
+</body>
+</html>
